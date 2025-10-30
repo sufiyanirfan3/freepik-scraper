@@ -173,21 +173,21 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
     session.urlsData[urlIndex].progress = "Opening page...";
     session.urlsData[urlIndex].progressPercent = 10;
 
-    const browser = await puppeteer.launch({
-      headless: "new",
-      executablePath:
-        process.env.PUPPETEER_EXECUTABLE_PATH || "/nix/store/*/bin/chromium",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--no-zygote",
-        "--single-process",
-        "--disable-gpu",
-      ],
-    });
+ const browser = await puppeteer.launch({
+    headless: 'new',
+    executablePath: puppeteer.executablePath(),
+    args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu',
+        '--disable-software-rasterizer'
+    ]
+});
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
