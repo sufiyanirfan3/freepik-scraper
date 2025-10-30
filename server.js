@@ -176,7 +176,7 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
     const browser = await puppeteer.launch({
       headless: "new",
       executablePath:
-        process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser",
+        process.env.PUPPETEER_EXECUTABLE_PATH || "/nix/store/*/bin/chromium",
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -184,6 +184,7 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
         "--disable-accelerated-2d-canvas",
         "--no-first-run",
         "--no-zygote",
+        "--single-process",
         "--disable-gpu",
       ],
     });
