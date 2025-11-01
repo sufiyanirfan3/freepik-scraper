@@ -154,53 +154,43 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
   const query = extractQueryFromUrl(freepikUrl);
   const timestamp = Date.now() + urlIndex;
   const urlTempDir = path.join(tempDir, `${query}_${timestamp}`);
-
   // Update status to processing
   session.urlsData[urlIndex].status = "processing";
   session.urlsData[urlIndex].progress = "Launching browser...";
   session.urlsData[urlIndex].progressPercent = 5;
-
   console.log(`\n[${urlIndex + 1}] Processing: ${freepikUrl}`);
   console.log(`Image limit: ${imageLimit ? imageLimit : "unlimited"}`);
-
   if (!fs.existsSync(urlTempDir)) {
     fs.mkdirSync(urlTempDir, { recursive: true });
   }
-
   try {
     const puppeteer = require("puppeteer");
-
     session.urlsData[urlIndex].progress = "Opening page...";
     session.urlsData[urlIndex].progressPercent = 10;
-
- const browser = await puppeteer.launch({
-    headless: 'new',
-    executablePath: puppeteer.executablePath(),
-    args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu',
-        '--disable-software-rasterizer'
-    ]
-});
-
+    const browser = await puppeteer.launch({
+      headless: "new",
+      executablePath: puppeteer.executablePath(),
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--single-process",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+      ],
+    });
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
-
     session.urlsData[urlIndex].progress = "Loading page...";
     session.urlsData[urlIndex].progressPercent = 15;
-
     await page.goto(freepikUrl, { waitUntil: "networkidle0", timeout: 30000 });
-    await page.waitForSelector("figure img", { timeout: 10000 });
-
+    await page.waitForSelector("img, video", { timeout: 10000 });
     // Get total results count from the page
     const totalResults = await page.evaluate(() => {
       const resultsElement = document.querySelector(
@@ -213,12 +203,10 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
       }
       return 500;
     });
-
     // Apply image limit if set
     const targetImages = imageLimit
       ? Math.min(totalResults, imageLimit)
       : totalResults;
-
     console.log(
       `  [${
         urlIndex + 1
@@ -228,17 +216,14 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
       ? `Found ${totalResults} results. Loading ${targetImages} images (limit applied)...`
       : `Found ${totalResults} results. Loading all images...`;
     session.urlsData[urlIndex].progressPercent = 20;
-
     // Scroll to load images
     let previousImageCount = 0;
     let attempts = 0;
     let noNewImagesCount = 0;
     const maxAttempts = 100;
-
     while (attempts < maxAttempts) {
       await page.evaluate(() => window.scrollBy(0, 1200));
       await new Promise((resolve) => setTimeout(resolve, 1500));
-
       try {
         const loadMoreButton = await page.$(
           'button[data-testid="load-more-button"]'
@@ -249,11 +234,9 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
         }
       } catch (error) {}
-
       const currentImageCount = await page.evaluate(() => {
-        return document.querySelectorAll("figure img").length;
+        return document.querySelectorAll("img, video").length;
       });
-
       const scrollProgress = 20 + (currentImageCount / targetImages) * 40;
       session.urlsData[
         urlIndex
@@ -262,13 +245,11 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
         Math.floor(scrollProgress),
         60
       );
-
       console.log(
         `  [${urlIndex + 1}] 📸 Attempt ${
           attempts + 1
         }: Found ${currentImageCount}/${targetImages} images`
       );
-
       // Check if we've reached or exceeded the target
       if (currentImageCount >= targetImages) {
         console.log(
@@ -276,14 +257,12 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
         );
         break;
       }
-
       // Check if new images loaded
       if (currentImageCount === previousImageCount) {
         noNewImagesCount++;
         console.log(
           `  [${urlIndex + 1}] No new images loaded (${noNewImagesCount}/5)`
         );
-
         if (noNewImagesCount >= 5) {
           console.log(
             `  [${
@@ -295,47 +274,59 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
       } else {
         noNewImagesCount = 0;
       }
-
       previousImageCount = currentImageCount;
       attempts++;
     }
-
     // Wait for lazy-loaded images
     await new Promise((resolve) => setTimeout(resolve, 3000));
-
     session.urlsData[urlIndex].progress = "Extracting image URLs...";
     session.urlsData[urlIndex].progressPercent = 60;
-
     const imageUrls = await page.evaluate(() => {
       const images = [];
-      const figures = document.querySelectorAll("figure img");
-      figures.forEach((img) => {
+
+      // Get all images
+      const imgElements = document.querySelectorAll("img");
+      imgElements.forEach((img) => {
         const src = img.getAttribute("src");
         if (src && src.startsWith("http")) {
           images.push(src);
         }
       });
+
+      // Get all videos
+      const videoElements = document.querySelectorAll("video");
+      videoElements.forEach((video) => {
+        const src = video.getAttribute("src");
+        if (src && src.startsWith("http")) {
+          images.push(src);
+        }
+
+        // Also check for source tags inside video
+        const sources = video.querySelectorAll("source");
+        sources.forEach((source) => {
+          const srcVal = source.getAttribute("src");
+          if (srcVal && srcVal.startsWith("http")) {
+            images.push(srcVal);
+          }
+        });
+      });
+
       return images;
     });
-
     await browser.close();
-
     // Apply limit to extracted URLs if needed
     const finalImageUrls = imageLimit
       ? imageUrls.slice(0, imageLimit)
       : imageUrls;
-
     console.log(
       `  [${urlIndex + 1}] ✅ Extracted ${
         imageUrls.length
       } images, downloading ${finalImageUrls.length} images`
     );
-
     session.urlsData[
       urlIndex
     ].progress = `Downloading ${finalImageUrls.length} images...`;
     session.urlsData[urlIndex].progressPercent = 65;
-
     // Download images
     const downloadedFiles = [];
     for (let i = 0; i < finalImageUrls.length; i++) {
@@ -343,11 +334,9 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
       const ext = path.extname(new URL(imageUrl).pathname) || ".jpg";
       const filename = `image_${i + 1}${ext}`;
       const filepath = path.join(urlTempDir, filename);
-
       try {
         await downloadImage(imageUrl, filepath);
         downloadedFiles.push(filepath);
-
         const downloadProgress = 65 + (i / finalImageUrls.length) * 25;
         if ((i + 1) % 10 === 0 || i === finalImageUrls.length - 1) {
           session.urlsData[urlIndex].progress = `Downloaded ${i + 1}/${
@@ -363,27 +352,21 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
         );
       }
     }
-
     session.urlsData[urlIndex].progress = "Creating ZIP file...";
     session.urlsData[urlIndex].progressPercent = 90;
-
     // Create ZIP
     const zipFileName = `${query}_${timestamp}.zip`;
     const zipFilePath = path.join(outputDir, zipFileName);
-
     await createZipFile(downloadedFiles, zipFilePath);
-
     // Clean up temp directory immediately after creating ZIP
     fs.rmSync(urlTempDir, { recursive: true, force: true });
     console.log(`  [${urlIndex + 1}] 🗑️  Cleaned up temp directory`);
-
     session.urlsData[urlIndex].status = "completed";
     session.urlsData[
       urlIndex
     ].progress = `✅ Completed! ${downloadedFiles.length} images`;
     session.urlsData[urlIndex].progressPercent = 100;
     session.urlsData[urlIndex].zipFile = zipFileName;
-
     console.log(
       `  [${urlIndex + 1}] ✅ Completed: ${zipFileName} with ${
         downloadedFiles.length
@@ -391,11 +374,9 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
     );
   } catch (error) {
     console.error(`  [${urlIndex + 1}] ❌ Error: ${error.message}`);
-
     session.urlsData[urlIndex].status = "error";
     session.urlsData[urlIndex].progress = `❌ Error: ${error.message}`;
     session.urlsData[urlIndex].progressPercent = 0;
-
     // Clean up temp directory on error
     if (fs.existsSync(urlTempDir)) {
       fs.rmSync(urlTempDir, { recursive: true, force: true });
