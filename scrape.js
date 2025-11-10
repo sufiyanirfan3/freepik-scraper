@@ -121,7 +121,7 @@ async function scrapeImages() {
         const url = 'https://www.freepik.com/search?ai=excluded&format=search&last_filter=orientation&last_value=square&orientation=square&query=Karachi';
         
         console.log('Navigating to page...');
-        await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+        await page.goto(url, { waitUntil: 'networkidle0', timeout: 60000 });
         
         // Wait for initial images to load
         console.log('Waiting for initial images to load...');

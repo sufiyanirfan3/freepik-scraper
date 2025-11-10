@@ -5,7 +5,6 @@ const fs = require("fs");
 const path = require("path");
 const csv = require("csv-parser");
 const archiver = require("archiver");
-
 const app = express();
 const upload = multer({ dest: "uploads/" });
 
@@ -24,19 +23,19 @@ if (!fs.existsSync("./uploads")) {
 
 // Store active processing sessions
 const activeSessions = new Map();
-
 // Track downloaded files for cleanup
-const downloadedZips = new Map(); // filename -> timestamp
+const downloadedZips = new Map();
 
-// Download image function
+// Download image function with stream optimization
 async function downloadImage(url, filepath) {
   const response = await axios({
     url,
     method: "GET",
     responseType: "stream",
     timeout: 30000,
+    maxContentLength: 50 * 1024 * 1024, // 50MB limit per image
+    maxBodyLength: 50 * 1024 * 1024,
   });
-
   return new Promise((resolve, reject) => {
     const writer = fs.createWriteStream(filepath);
     response.data.pipe(writer);
@@ -59,29 +58,24 @@ function extractQueryFromUrl(url) {
   }
 }
 
-// Create zip file
+// Create zip file with compression optimization
 async function createZipFile(imageFiles, zipPath) {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(zipPath);
     const archive = archiver("zip", {
-      zlib: { level: 9 },
+      zlib: { level: 6 }, // Reduced from 9 to 6 for faster compression
     });
-
     output.on("close", () => {
       resolve();
     });
-
     archive.on("error", (err) => {
       reject(err);
     });
-
     archive.pipe(output);
-
     imageFiles.forEach((file, index) => {
       const filename = `image_${index + 1}${path.extname(file)}`;
       archive.file(file, { name: filename });
     });
-
     archive.finalize();
   });
 }
@@ -90,7 +84,6 @@ async function createZipFile(imageFiles, zipPath) {
 async function parseUrlsFromFile(filepath, fileExtension) {
   return new Promise((resolve, reject) => {
     const urls = [];
-
     if (fileExtension === ".txt") {
       const content = fs.readFileSync(filepath, "utf-8");
       const lines = content.split("\n");
@@ -124,11 +117,10 @@ async function parseUrlsFromFile(filepath, fileExtension) {
   });
 }
 
-// Cleanup old ZIP files (delete after 5 minutes of being downloaded)
+// Cleanup old ZIP files
 function cleanupOldZips() {
   const now = Date.now();
-  const maxAge = 5 * 60 * 1000; // 5 minutes
-
+  const maxAge = 5 * 60 * 1000;
   downloadedZips.forEach((timestamp, filename) => {
     if (now - timestamp > maxAge) {
       const filepath = path.join(outputDir, filename);
@@ -145,31 +137,33 @@ function cleanupOldZips() {
   });
 }
 
-// Run cleanup every minute
 setInterval(cleanupOldZips, 60000);
 
-// Process a single URL
+// Process a single URL with memory optimization
 async function processSingleUrl(freepikUrl, urlIndex, session) {
   const { imageLimit } = session;
   const query = extractQueryFromUrl(freepikUrl);
   const timestamp = Date.now() + urlIndex;
   const urlTempDir = path.join(tempDir, `${query}_${timestamp}`);
-  // Update status to processing
+
   session.urlsData[urlIndex].status = "processing";
   session.urlsData[urlIndex].progress = "Launching browser...";
   session.urlsData[urlIndex].progressPercent = 5;
   console.log(`\n[${urlIndex + 1}] Processing: ${freepikUrl}`);
   console.log(`Image limit: ${imageLimit ? imageLimit : "unlimited"}`);
+
   if (!fs.existsSync(urlTempDir)) {
     fs.mkdirSync(urlTempDir, { recursive: true });
   }
+
+  let browser;
   try {
     const puppeteer = require("puppeteer");
     session.urlsData[urlIndex].progress = "Opening page...";
     session.urlsData[urlIndex].progressPercent = 10;
-    const browser = await puppeteer.launch({
+
+    browser = await puppeteer.launch({
       headless: "new",
-      executablePath: puppeteer.executablePath(),
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -180,18 +174,43 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
         "--single-process",
         "--disable-gpu",
         "--disable-software-rasterizer",
+        "--disable-extensions",
+        "--disable-default-apps",
+        "--disable-background-networking",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--mute-audio",
+        "--no-default-browser-check",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
       ],
     });
+
     const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
+
+    // Reduce memory usage
+    await page.setViewport({ width: 1280, height: 720 }); // Reduced from 1920x1080
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
+
+    // Block unnecessary resources to save bandwidth and memory
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const resourceType = req.resourceType();
+      if (["font", "stylesheet", "media"].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     session.urlsData[urlIndex].progress = "Loading page...";
     session.urlsData[urlIndex].progressPercent = 15;
-    await page.goto(freepikUrl, { waitUntil: "networkidle0", timeout: 30000 });
-    await page.waitForSelector("img, video", { timeout: 10000 });
-    // Get total results count from the page
+    await page.goto(freepikUrl, { waitUntil: "networkidle2", timeout: 60000 }); // Changed to networkidle2
+    await page.waitForSelector("img, video", { timeout: 20000 });
+
     const totalResults = await page.evaluate(() => {
       const resultsElement = document.querySelector(
         "span.flex.items-center.whitespace-nowrap"
@@ -203,27 +222,32 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
       }
       return 500;
     });
-    // Apply image limit if set
+
     const targetImages = imageLimit
       ? Math.min(totalResults, imageLimit)
       : totalResults;
+
     console.log(
       `  [${
         urlIndex + 1
       }] 🎯 Total results: ${totalResults}, Target: ${targetImages}`
     );
+
     session.urlsData[urlIndex].progress = imageLimit
       ? `Found ${totalResults} results. Loading ${targetImages} images (limit applied)...`
       : `Found ${totalResults} results. Loading all images...`;
     session.urlsData[urlIndex].progressPercent = 20;
-    // Scroll to load images
+
+    // Scroll with optimized timing
     let previousImageCount = 0;
     let attempts = 0;
     let noNewImagesCount = 0;
     const maxAttempts = 100;
+
     while (attempts < maxAttempts) {
       await page.evaluate(() => window.scrollBy(0, 1200));
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // Reduced from 1500ms
+
       try {
         const loadMoreButton = await page.$(
           'button[data-testid="load-more-button"]'
@@ -231,12 +255,14 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
         if (loadMoreButton) {
           console.log(`  [${urlIndex + 1}] 🔘 Clicking "Load more" button...`);
           await loadMoreButton.click();
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+          await new Promise((resolve) => setTimeout(resolve, 1500)); // Reduced from 2000ms
         }
       } catch (error) {}
+
       const currentImageCount = await page.evaluate(() => {
         return document.querySelectorAll("img, video").length;
       });
+
       const scrollProgress = 20 + (currentImageCount / targetImages) * 40;
       session.urlsData[
         urlIndex
@@ -245,19 +271,20 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
         Math.floor(scrollProgress),
         60
       );
+
       console.log(
         `  [${urlIndex + 1}] 📸 Attempt ${
           attempts + 1
         }: Found ${currentImageCount}/${targetImages} images`
       );
-      // Check if we've reached or exceeded the target
+
       if (currentImageCount >= targetImages) {
         console.log(
           `  [${urlIndex + 1}] ✅ Reached target of ${targetImages} images!`
         );
         break;
       }
-      // Check if new images loaded
+
       if (currentImageCount === previousImageCount) {
         noNewImagesCount++;
         console.log(
@@ -274,17 +301,18 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
       } else {
         noNewImagesCount = 0;
       }
+
       previousImageCount = currentImageCount;
       attempts++;
     }
-    // Wait for lazy-loaded images
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    await new Promise((resolve) => setTimeout(resolve, 2000)); // Reduced from 3000ms
+
     session.urlsData[urlIndex].progress = "Extracting image URLs...";
     session.urlsData[urlIndex].progressPercent = 60;
+
     const imageUrls = await page.evaluate(() => {
       const images = [];
-
-      // Get all images
       const imgElements = document.querySelectorAll("img");
       imgElements.forEach((img) => {
         const src = img.getAttribute("src");
@@ -292,16 +320,12 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
           images.push(src);
         }
       });
-
-      // Get all videos
       const videoElements = document.querySelectorAll("video");
       videoElements.forEach((video) => {
         const src = video.getAttribute("src");
         if (src && src.startsWith("http")) {
           images.push(src);
         }
-
-        // Also check for source tags inside video
         const sources = video.querySelectorAll("source");
         sources.forEach((source) => {
           const srcVal = source.getAttribute("src");
@@ -310,57 +334,81 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
           }
         });
       });
-
       return images;
     });
+
     await browser.close();
-    // Apply limit to extracted URLs if needed
+    browser = null; // Help garbage collection
+
     const finalImageUrls = imageLimit
       ? imageUrls.slice(0, imageLimit)
       : imageUrls;
+
     console.log(
       `  [${urlIndex + 1}] ✅ Extracted ${
         imageUrls.length
       } images, downloading ${finalImageUrls.length} images`
     );
+
     session.urlsData[
       urlIndex
     ].progress = `Downloading ${finalImageUrls.length} images...`;
     session.urlsData[urlIndex].progressPercent = 65;
-    // Download images
+
+    // Download images in smaller chunks to reduce memory pressure
     const downloadedFiles = [];
-    for (let i = 0; i < finalImageUrls.length; i++) {
-      const imageUrl = finalImageUrls[i];
-      const ext = path.extname(new URL(imageUrl).pathname) || ".jpg";
-      const filename = `image_${i + 1}${ext}`;
-      const filepath = path.join(urlTempDir, filename);
-      try {
-        await downloadImage(imageUrl, filepath);
-        downloadedFiles.push(filepath);
-        const downloadProgress = 65 + (i / finalImageUrls.length) * 25;
-        if ((i + 1) % 10 === 0 || i === finalImageUrls.length - 1) {
-          session.urlsData[urlIndex].progress = `Downloaded ${i + 1}/${
-            finalImageUrls.length
-          } images`;
-          session.urlsData[urlIndex].progressPercent =
-            Math.floor(downloadProgress);
-        }
-      } catch (error) {
-        console.error(
-          `  [${urlIndex + 1}] ❌ Failed to download image ${i + 1}:`,
-          error.message
-        );
-      }
+    const DOWNLOAD_CHUNK_SIZE = 5; // Download 5 images at a time
+
+    for (let i = 0; i < finalImageUrls.length; i += DOWNLOAD_CHUNK_SIZE) {
+      const chunk = finalImageUrls.slice(
+        i,
+        Math.min(i + DOWNLOAD_CHUNK_SIZE, finalImageUrls.length)
+      );
+
+      await Promise.all(
+        chunk.map(async (imageUrl, chunkIndex) => {
+          const actualIndex = i + chunkIndex;
+          const ext = path.extname(new URL(imageUrl).pathname) || ".jpg";
+          const filename = `image_${actualIndex + 1}${ext}`;
+          const filepath = path.join(urlTempDir, filename);
+
+          try {
+            await downloadImage(imageUrl, filepath);
+            downloadedFiles.push(filepath);
+          } catch (error) {
+            console.error(
+              `  [${urlIndex + 1}] ❌ Failed to download image ${
+                actualIndex + 1
+              }:`,
+              error.message
+            );
+          }
+        })
+      );
+
+      const downloadProgress =
+        65 +
+        (Math.min(i + DOWNLOAD_CHUNK_SIZE, finalImageUrls.length) /
+          finalImageUrls.length) *
+          25;
+      session.urlsData[urlIndex].progress = `Downloaded ${Math.min(
+        i + DOWNLOAD_CHUNK_SIZE,
+        finalImageUrls.length
+      )}/${finalImageUrls.length} images`;
+      session.urlsData[urlIndex].progressPercent = Math.floor(downloadProgress);
     }
+
     session.urlsData[urlIndex].progress = "Creating ZIP file...";
     session.urlsData[urlIndex].progressPercent = 90;
-    // Create ZIP
+
     const zipFileName = `${query}_${timestamp}.zip`;
     const zipFilePath = path.join(outputDir, zipFileName);
     await createZipFile(downloadedFiles, zipFilePath);
-    // Clean up temp directory immediately after creating ZIP
+
+    // Clean up temp directory immediately
     fs.rmSync(urlTempDir, { recursive: true, force: true });
     console.log(`  [${urlIndex + 1}] 🗑️  Cleaned up temp directory`);
+
     session.urlsData[urlIndex].status = "completed";
     session.urlsData[
       urlIndex
@@ -377,17 +425,24 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
     session.urlsData[urlIndex].status = "error";
     session.urlsData[urlIndex].progress = `❌ Error: ${error.message}`;
     session.urlsData[urlIndex].progressPercent = 0;
-    // Clean up temp directory on error
+
     if (fs.existsSync(urlTempDir)) {
       fs.rmSync(urlTempDir, { recursive: true, force: true });
       console.log(
         `  [${urlIndex + 1}] 🗑️  Cleaned up temp directory after error`
       );
     }
+  } finally {
+    // Ensure browser is closed
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (e) {}
+    }
   }
 }
 
-// Serve HTML page
+// [HTML content remains the same - not shown for brevity]
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -621,7 +676,7 @@ app.get("/", (req, res) => {
 <body>
     <div class="container">
         <h1>📥 Image Downloader</h1>
-        <p class="subtitle">Upload Freepik URLs to download images as ZIP files (Parallel processing)</p>
+        <p class="subtitle">Upload Freepik URLs to download images as ZIP files (Optimized for low resources)</p>
         
         <form id="uploadForm" enctype="multipart/form-data">
             <div class="upload-area" id="uploadArea">
@@ -649,7 +704,7 @@ app.get("/", (req, res) => {
         </form>
         
         <div class="progress-section" id="progressSection">
-            <div class="batch-info" id="batchInfo">Processing in batches of 10 URLs...</div>
+            <div class="batch-info" id="batchInfo">Processing URLs sequentially...</div>
             <div id="urlCards"></div>
         </div>
         
@@ -657,10 +712,9 @@ app.get("/", (req, res) => {
             <strong>📋 File Format:</strong>
             <strong>TXT:</strong> One Freepik URL per line<br>
             <strong>CSV:</strong> Column named "urls" or "url" with Freepik URLs<br>
-            <strong>Note:</strong> ZIP files auto-download and are deleted from server after 5 minutes. Processing 10 URLs in parallel!
+            <strong>Note:</strong> ZIP files auto-download and are deleted from server after 5 minutes. Optimized for low server resources!
         </div>
     </div>
-
     <script>
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
@@ -675,16 +729,13 @@ app.get("/", (req, res) => {
         let sessionId = null;
         let pollInterval = null;
         let downloadedFiles = new Set();
-
         uploadArea.addEventListener('dragover', (e) => {
             e.preventDefault();
             uploadArea.classList.add('dragover');
         });
-
         uploadArea.addEventListener('dragleave', () => {
             uploadArea.classList.remove('dragover');
         });
-
         uploadArea.addEventListener('drop', (e) => {
             e.preventDefault();
             uploadArea.classList.remove('dragover');
@@ -694,21 +745,17 @@ app.get("/", (req, res) => {
                 updateFileInfo(files[0]);
             }
         });
-
         uploadArea.addEventListener('click', () => {
             fileInput.click();
         });
-
         fileInput.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
                 updateFileInfo(e.target.files[0]);
             }
         });
-
         function updateFileInfo(file) {
             fileInfo.textContent = 'Selected: ' + file.name + ' (' + (file.size / 1024).toFixed(2) + ' KB)';
         }
-
         function createUrlCard(index, query) {
             return '<div class="url-card" id="card-' + index + '">' +
                 '<div class="url-header">' +
@@ -722,31 +769,25 @@ app.get("/", (req, res) => {
                 '<div id="download-' + index + '"></div>' +
                 '</div>';
         }
-
         function updateCard(index, status, progress, progressPercent, downloadLink) {
             const card = document.getElementById('card-' + index);
             const statusEl = document.getElementById('status-' + index);
             const progressEl = document.getElementById('progress-' + index);
             const progressFill = document.getElementById('progress-fill-' + index);
             const downloadEl = document.getElementById('download-' + index);
-
             if (card) {
                 card.className = 'url-card ' + status;
             }
-
             if (statusEl) {
                 statusEl.className = 'url-status status-' + status;
                 statusEl.textContent = status.charAt(0).toUpperCase() + status.slice(1);
             }
-
             if (progressEl) {
                 progressEl.textContent = progress;
             }
-
             if (progressFill) {
                 progressFill.style.width = progressPercent + '%';
             }
-
             if (downloadLink && downloadEl && !downloadedFiles.has(downloadLink)) {
                 downloadedFiles.add(downloadLink);
                 
@@ -766,14 +807,11 @@ app.get("/", (req, res) => {
                 downloadEl.innerHTML = '<div class="download-message">📥 Downloaded automatically! (Will be deleted from server in 5 min)</div>';
             }
         }
-
         async function pollProgress() {
             if (!sessionId) return;
-
             try {
                 const response = await fetch('/progress/' + sessionId);
                 const data = await response.json();
-
                 if (data.urls) {
                     data.urls.forEach(function(urlData, index) {
                         updateCard(
@@ -785,13 +823,11 @@ app.get("/", (req, res) => {
                         );
                     });
                     
-                    // Update batch info
                     const processing = data.urls.filter(u => u.status === 'processing').length;
                     const completed = data.urls.filter(u => u.status === 'completed').length;
                     const total = data.urls.length;
-                    batchInfo.textContent = 'Processing ' + processing + ' URLs in parallel | Completed: ' + completed + '/' + total;
+                    batchInfo.textContent = 'Processing: ' + processing + ' | Completed: ' + completed + '/' + total;
                 }
-
                 if (data.completed) {
                     clearInterval(pollInterval);
                     submitBtn.disabled = false;
@@ -801,7 +837,6 @@ app.get("/", (req, res) => {
                 console.error('Poll error:', error);
             }
         }
-
         uploadForm.addEventListener('submit', async function(e) {
             e.preventDefault();
             
@@ -832,9 +867,7 @@ app.get("/", (req, res) => {
                         const query = new URL(url).searchParams.get('query') || 'images';
                         urlCards.innerHTML += createUrlCard(index, query);
                     });
-
-                    pollInterval = setInterval(pollProgress, 500);
-
+                    pollInterval = setInterval(pollProgress, 1000);
                     fetch('/process/' + sessionId, { method: 'POST' });
                 } else {
                     alert('Error: ' + initResult.message);
@@ -850,22 +883,18 @@ app.get("/", (req, res) => {
 </html>`);
 });
 
-// Initialize upload and create session
 app.post("/init-upload", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.json({ success: false, message: "No file uploaded" });
     }
-
     const filePath = req.file.path;
     const fileExtension = path.extname(req.file.originalname).toLowerCase();
     const imageLimit = req.body.imageLimit
       ? parseInt(req.body.imageLimit)
       : null;
 
-    // Parse URLs from file
     const urls = await parseUrlsFromFile(filePath, fileExtension);
-
     if (urls.length === 0) {
       fs.unlinkSync(filePath);
       return res.json({
@@ -874,7 +903,6 @@ app.post("/init-upload", upload.single("file"), async (req, res) => {
       });
     }
 
-    // Create session
     const sessionId = Date.now().toString();
     activeSessions.set(sessionId, {
       filePath,
@@ -894,7 +922,9 @@ app.post("/init-upload", upload.single("file"), async (req, res) => {
     console.log(
       `\nImage limit set to: ${imageLimit ? imageLimit : "unlimited"}`
     );
-    console.log(`Processing ${urls.length} URLs in batches of 10\n`);
+    console.log(
+      `Processing ${urls.length} URLs sequentially (low resource mode)\n`
+    );
 
     res.json({
       success: true,
@@ -907,7 +937,6 @@ app.post("/init-upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// Get progress for a session
 app.get("/progress/:sessionId", (req, res) => {
   const session = activeSessions.get(req.params.sessionId);
   if (session) {
@@ -920,68 +949,43 @@ app.get("/progress/:sessionId", (req, res) => {
   }
 });
 
-// Process URLs in batches of 10
+// Process URLs sequentially (changed from batch processing)
 app.post("/process/:sessionId", async (req, res) => {
   const sessionId = req.params.sessionId;
   const session = activeSessions.get(sessionId);
-
   if (!session) {
     return res.json({ success: false, message: "Session not found" });
   }
 
-  // Send immediate response
   res.json({ success: true, message: "Processing started" });
 
-  // Process in background
   const { urls, filePath } = session;
-  const BATCH_SIZE = 2;
 
-  // Split URLs into batches
-  for (let batchStart = 0; batchStart < urls.length; batchStart += BATCH_SIZE) {
-    const batchEnd = Math.min(batchStart + BATCH_SIZE, urls.length);
-    const batch = urls.slice(batchStart, batchEnd);
+  // Process sequentially instead of in batches
+  for (let i = 0; i < urls.length; i++) {
+    console.log(`\n🔄 Processing URL ${i + 1}/${urls.length}`);
+    await processSingleUrl(urls[i], i, session);
 
-    console.log(
-      `\n🔄 Processing batch ${Math.floor(batchStart / BATCH_SIZE) + 1}: URLs ${
-        batchStart + 1
-      }-${batchEnd}`
-    );
-
-    // Process batch in parallel
-    const batchPromises = batch.map((url, batchIndex) => {
-      const urlIndex = batchStart + batchIndex;
-      return processSingleUrl(url, urlIndex, session);
-    });
-
-    // Wait for current batch to complete before starting next batch
-    await Promise.all(batchPromises);
-
-    console.log(
-      `\n✅ Batch ${Math.floor(batchStart / BATCH_SIZE) + 1} completed\n`
-    );
+    // Small delay between URLs to prevent resource spikes
+    if (i < urls.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
   }
 
-  // Clean up uploaded file
   fs.unlinkSync(filePath);
   session.completed = true;
-
   console.log("\n🎉 All URLs processed!\n");
 
-  // Clean up session after 1 hour
   setTimeout(() => {
     activeSessions.delete(sessionId);
   }, 3600000);
 });
 
-// Serve ZIP files for download
 app.get("/download/:filename", (req, res) => {
   const filename = req.params.filename;
   const filepath = path.join(outputDir, filename);
-
   if (fs.existsSync(filepath)) {
-    // Mark file as downloaded for cleanup
     downloadedZips.set(filename, Date.now());
-
     res.download(filepath, filename, (err) => {
       if (err) {
         console.error("Download error:", err);
@@ -1000,6 +1004,6 @@ const PORT = 3000;
 app.listen(PORT, () => {
   console.log(`\n🚀 Server running at http://localhost:${PORT}`);
   console.log(`📁 ZIP files will be saved to: ${path.resolve(outputDir)}`);
-  console.log(`⚡ Parallel processing: 10 URLs at a time`);
+  console.log(`⚡ Sequential processing (optimized for low resources)`);
   console.log(`🗑️  Auto-cleanup: ZIP files deleted 5 minutes after download\n`);
 });
