@@ -934,7 +934,7 @@ app.post("/process/:sessionId", async (req, res) => {
 
   // Process in background
   const { urls, filePath } = session;
-  const BATCH_SIZE = 10;
+  const BATCH_SIZE = 2;
 
   // Split URLs into batches
   for (let batchStart = 0; batchStart < urls.length; batchStart += BATCH_SIZE) {
