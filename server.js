@@ -73,7 +73,7 @@ async function createZipFile(imageFiles, zipPath) {
     });
     archive.pipe(output);
     imageFiles.forEach((file, index) => {
-      const filename = `image_${index + 1}${path.extname(file)}`;
+      const filename = path.basename(file);
       archive.file(file, { name: filename });
     });
     archive.finalize();
@@ -369,7 +369,7 @@ async function processSingleUrl(freepikUrl, urlIndex, session) {
         chunk.map(async (imageUrl, chunkIndex) => {
           const actualIndex = i + chunkIndex;
           const ext = path.extname(new URL(imageUrl).pathname) || ".jpg";
-          const filename = `image_${actualIndex + 1}${ext}`;
+          const filename = `${query}_${actualIndex + 1}${ext}`;
           const filepath = path.join(urlTempDir, filename);
 
           try {
